@@ -46,7 +46,19 @@ export default function App() {
       // Helper to fetch and convert to base64
       const getBase64Image = async (url: string) => {
         try {
-           const response = await fetch(url, { mode: 'cors' });
+           // CACHE BUSTER: Add timestamp to force browser to re-request image with correct headers
+           const timestamp = new Date().getTime();
+           const fetchUrl = url.includes('?') ? `${url}&t=${timestamp}` : `${url}?t=${timestamp}`;
+
+           const response = await fetch(fetchUrl, { 
+             mode: 'cors',
+             cache: 'no-store' 
+           });
+           
+           if (!response.ok) {
+             throw new Error(`Failed to load image: ${response.status} ${response.statusText}`);
+           }
+
            const blob = await response.blob();
            return new Promise<string>((resolve, reject) => {
              const reader = new FileReader();
@@ -55,8 +67,9 @@ export default function App() {
              reader.readAsDataURL(blob);
            });
         } catch (e) {
-          console.warn("Failed to load image via fetch, keeping original:", url);
-          return url; // Fallback to original if fetch fails (e.g. strict CORS)
+          console.warn("Failed to load image via fetch:", url, e);
+          // Determine if we should fail hard or fallback
+          throw e; // Throwing error to alert user instead of silently failing
         }
       };
 
@@ -64,8 +77,13 @@ export default function App() {
       await Promise.all(images.map(async (img) => {
         // Only attempt to proxy if it's not already a data URL or blob
         if (img.src.startsWith('http')) {
-            const newSrc = await getBase64Image(img.src);
-            img.src = newSrc;
+            try {
+              const newSrc = await getBase64Image(img.src);
+              img.src = newSrc;
+            } catch (err) {
+              console.error(`Could not process image ${img.src}:`, err);
+              // We continue, but the image might be blank or cause a taint error
+            }
         }
       }));
 
@@ -76,6 +94,8 @@ export default function App() {
         useCORS: true,
         scale: 2, // for better resolution
         backgroundColor: null,
+        // Logging helps debugging in console
+        logging: true,
       });
 
       // 3. Restore original image sources immediately
@@ -90,9 +110,10 @@ export default function App() {
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error generating image:", error);
-      alert("There was an error generating the download. Please try again.");
+      // Show specific error message
+      alert(`Error generating download: ${error.message || error}`);
     } finally {
       setIsDownloading(false);
     }
