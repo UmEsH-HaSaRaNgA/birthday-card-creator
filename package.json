@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "homepage": "https://UmEsH-HaSaRaNgA.github.io/testing-project",
+  "homepage": "https://UmEsH-HaSaRaNgA.github.io/Birthday-card-generator-tool",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -12,7 +12,7 @@
     "deploy": "gh-pages -d dist"
   },
   "dependencies": {
-    "html2canvas": "^1.4.1",
+    "html-to-image": "^1.11.11",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
@@ -23,4 +23,3 @@
     "vite": "^6.2.0",
     "gh-pages": "^6.1.1"
   }
-}
