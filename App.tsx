@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import BirthdayCard from './components/BirthdayCard';
 import Editor from './components/Editor';
 import { useCardState } from './hooks/useCardState';
-import html2canvas from 'html2canvas';
+import { toPng } from 'html-to-image';
 
 const DownloadIcon: React.FC = () => (
   <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -17,96 +17,131 @@ const LoadingIcon: React.FC = () => (
   </svg>
 );
 
-
 export default function App() {
   const { cardData, handleTextChange, handleImageChange, handleBackgroundImageChange } = useCardState();
   const cardRef = useRef<HTMLDivElement>(null);
   const [isDownloading, setIsDownloading] = useState(false);
 
   const handleDownload = async () => {
-    if (!cardRef.current) {
-      console.error("Card element not found");
-      return;
-    }
+    if (!cardRef.current) return;
 
     setIsDownloading(true);
+    
+    // Track modifications to restore them later
+    const originalSrcs = new Map<HTMLImageElement, string>();
+    let injectedStyle: HTMLStyleElement | null = null;
+    const removedLinks: { node: Element, parent: Node, nextSibling: Node | null }[] = [];
 
     try {
-      // 1. Wait for fonts to be ready
       await document.fonts.ready;
 
-      // 2. Pre-process images to DataURLs to bypass CORS issues in html2canvas
-      const images = Array.from(cardRef.current.querySelectorAll('img')) as HTMLImageElement[];
-      const originalSrcs = images.map(img => img.src);
-
-      // Helper to fetch and convert to base64
-      const getBase64Image = async (url: string) => {
-        try {
-           // CACHE BUSTER: Add timestamp to force browser to re-request image with correct headers
-           const timestamp = new Date().getTime();
-           const fetchUrl = url.includes('?') ? `${url}&t=${timestamp}` : `${url}?t=${timestamp}`;
-
-           const response = await fetch(fetchUrl, { 
-             mode: 'cors',
-             cache: 'no-store' 
-           });
-           
-           if (!response.ok) {
-             throw new Error(`Failed to load image: ${response.status} ${response.statusText}`);
-           }
-
-           const blob = await response.blob();
-           return new Promise<string>((resolve, reject) => {
-             const reader = new FileReader();
-             reader.onloadend = () => resolve(reader.result as string);
-             reader.onerror = reject;
-             reader.readAsDataURL(blob);
-           });
-        } catch (e) {
-          console.warn("Failed to load image via fetch:", url, e);
-          throw e; 
-        }
-      };
-
-      // Swap sources
+      // 1. PRE-PROCESS IMAGES TO BASE64
+      // This bypasses html-to-image's internal fetcher which often fails with CORS
+      const images = Array.from(cardRef.current.querySelectorAll('img'));
+      
       await Promise.all(images.map(async (img) => {
-        if (img.src.startsWith('http')) {
-            try {
-              const newSrc = await getBase64Image(img.src);
-              img.src = newSrc;
-            } catch (err) {
-              console.error(`Could not process image ${img.src}:`, err);
-            }
+        const src = img.src;
+        // Skip already local data URLs
+        if (src.startsWith('data:')) return;
+
+        try {
+          // Add timestamp to bypass cache
+          const fetchUrl = src.startsWith('http') && !src.includes('placehold.co') 
+            ? `${src}${src.includes('?') ? '&' : '?'}t=${Date.now()}` 
+            : src;
+
+          const response = await fetch(fetchUrl, { mode: 'cors' });
+          const blob = await response.blob();
+          
+          return new Promise<void>((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              if (reader.result) {
+                originalSrcs.set(img, src); // Save original
+                img.src = reader.result as string; // Swap to Base64
+              }
+              resolve();
+            };
+            reader.readAsDataURL(blob);
+          });
+        } catch (e) {
+          console.warn("Failed to convert image to Base64, leaving original", src, e);
         }
       }));
 
-      // Small delay to allow React/DOM to update with new sources
-      await new Promise(resolve => setTimeout(resolve, 200));
+      // Give React/DOM a moment to render the Base64 images
+      await new Promise(resolve => setTimeout(resolve, 100));
 
-      const canvas = await html2canvas(cardRef.current, {
-        useCORS: true,
-        scale: 2, 
-        backgroundColor: null,
-        logging: true,
+      // 2. MANUALLY INJECT FONTS (Bypass CORS)
+      // We fetch the CSS text and inject it locally into the card.
+      try {
+        const fontRes = await fetch('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;700&family=Satisfy&display=swap');
+        const fontCss = await fontRes.text();
+        injectedStyle = document.createElement('style');
+        injectedStyle.textContent = fontCss;
+        cardRef.current.appendChild(injectedStyle);
+      } catch (e) {
+        console.warn("Manual font fetch failed", e);
+      }
+
+      // 3. REMOVE EXTERNAL LINKS (The "Nuclear" Fix)
+      // We physically remove the <link> tag from the DOM so html-to-image can't find it to crash.
+      const links = document.querySelectorAll('link[rel="stylesheet"]');
+      links.forEach(link => {
+        const href = link.getAttribute('href') || '';
+        // Target Google Fonts or other external sheets
+        if (href.includes('fonts.googleapis.com')) {
+          const parent = link.parentNode;
+          if (parent) {
+            removedLinks.push({ node: link, parent, nextSibling: link.nextSibling });
+            parent.removeChild(link);
+          }
+        }
       });
 
-      // 3. Restore original image sources immediately
-      images.forEach((img, i) => {
-        img.src = originalSrcs[i];
+      // 4. CAPTURE
+      const dataUrl = await toPng(cardRef.current, {
+        cacheBust: true,
+        pixelRatio: 3,
+        quality: 1.0,
+        backgroundColor: '#0f172a',
+        filter: (node) => {
+          // Double safety: ignore any LINK tags if they managed to sneak in
+          return (node instanceof Element) ? node.tagName !== 'LINK' : true;
+        }
       });
 
-      const dataUrl = canvas.toDataURL('image/png');
+      // 5. DOWNLOAD
       const link = document.createElement('a');
       link.href = dataUrl;
       link.download = `birthday-card-${cardData.name.toLowerCase().replace(/ /g, '-')}.png`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+
     } catch (error: any) {
-      console.error("Error generating image:", error);
-      alert(`Error generating download: ${error.message || error}`);
+      console.error(error);
+      const msg = error.message || JSON.stringify(error, Object.getOwnPropertyNames(error));
+      alert(`Download failed: ${msg}`);
     } finally {
       setIsDownloading(false);
+      
+      // RESTORE STATE
+      
+      // 1. Put the font links back
+      removedLinks.forEach(({ node, parent, nextSibling }) => {
+        parent.insertBefore(node, nextSibling);
+      });
+
+      // 2. Remove the temporary injected style
+      if (injectedStyle && injectedStyle.parentNode) {
+        injectedStyle.parentNode.removeChild(injectedStyle);
+      }
+
+      // 3. Restore original image sources
+      originalSrcs.forEach((src, img) => {
+        img.src = src;
+      });
     }
   };
 
